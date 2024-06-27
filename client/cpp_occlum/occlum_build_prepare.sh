@@ -10,6 +10,7 @@ CURLDIR=curl
 PROTOBUFDIR=protobuf
 CARESDIR=cares
 GRPCDIR=grpc
+OPENSSL_LIB_DIR="/usr" 
 
 SHOW_HELP() {
     LOG_INFO "Usage: $0 [component-name]\n"
@@ -92,9 +93,24 @@ GITGET_GRPC() {
     return 0
 }
 
+
 openssl_check() {
+    local os_lib_path="/usr/lib/x86_64-linux-gnu/" # for ubuntu
+    local os_release=`awk -F= '/^NAME/{print $2}' /etc/os-release`
+    if [ "$os_release" != "\"Ubuntu\"" ]; then
+        echo "not Ubuntu"
+        os_lib_path="/usr/lib64/"  # for openanolis, alios
+    fi
+    
+    if [ -f "$os_lib_path/libcrypto.so.1.1" ]; then
+        OPENSSL_LIB_DIR="/usr"
+    else
+        OPENSSL_LIB_DIR=$OCCLUMINSTALLDIR
+    fi
+
     [ -f "$OCCLUMINSTALLDIR/lib/libcrypto.so.1.1" ] || \
     [ -f "$OCCLUMINSTALLDIR/lib64/libcrypto.so.1.1" ] || \
+    [ -f "$os_lib_path/libcrypto.so.1.1" ] || \
     return 1
 }
 
@@ -120,7 +136,7 @@ libcurl_build() {
     fi
     ./configure \
       --prefix=$OCCLUMINSTALLDIR \
-      --with-ssl=$OCCLUMINSTALLDIR \
+      --with-ssl=$OPENSSL_LIB_DIR \
       --without-zlib && \
     make -j && make install
 
@@ -233,6 +249,7 @@ if [ "$1" == "--libc" ] ; then
     fi
     shift 2
 fi
+
 export CC=$OCCLUMCC
 export CXX=$OCCLUMCXX
 export PATH=$INSTALLDIR/bin:$PATH
