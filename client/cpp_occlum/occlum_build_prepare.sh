@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 
-set -e
-
 THISDIR="$(dirname $(readlink -f $0))"
 
 DEPSDIR="$THISDIR/deps"
 
-ALL_COMPONENTS="libcurl cares grpc"
+ALL_COMPONENTS="openssl libcurl cares protobuf grpc"
 OPENSSLDIR=openssl
 CURLDIR=curl
 PROTOBUFDIR=protobuf
 CARESDIR=cares
 GRPCDIR=grpc
+OPENSSL_LIB_DIR="/usr" 
 
 SHOW_HELP() {
     LOG_INFO "Usage: $0 [component-name]\n"
@@ -46,7 +45,7 @@ TRYGET() {
         LOG_DEBUG "Downloading $pkg ..."
         wget $url -O $pkg || ERROR_EXIT "Fail to download $pkg"
     else
-        LOG_INFO "[READY] $pkg source package file"
+        LOG_INFO "[READY] $pkg"
     fi
 
     # Prepare the source code directory
@@ -58,8 +57,16 @@ TRYGET() {
         touch $dst/$flag && \
         LOG_DEBUG "Prepare $(basename $dst) source code successfully"
     else
-        LOG_INFO "[READY] $dst source directory"
+        LOG_INFO "[READY] $dst"
     fi
+}
+
+REQUIRE_SUCCESS() {
+    local count=1
+    while ! $@ ; do
+        let count+=1
+        echo "[Try again: $count] $@"
+    done
 }
 
 GITGET_GRPC() {
@@ -72,38 +79,52 @@ GITGET_GRPC() {
     LOG_DEBUG "Preparing source code: grpc ..."
     #rm -rf $GRPC_SRC_DIR && \
     mkdir -p $GRPC_SRC_DIR && cd $GRPC_SRC_DIR
-    git clone https://github.com/grpc/grpc.git .
+    REQUIRE_SUCCESS git clone https://github.com/grpc/grpc.git .
     git checkout tags/v1.24.3
     #git submodule update --init --recursive
     cd $GRPC_SRC_DIR/third_party/cares/cares
-    git submodule update --init .
+    REQUIRE_SUCCESS git submodule update --init .
     git checkout tags/cares-1_15_0
     cd $GRPC_SRC_DIR/third_party/protobuf
-    git submodule update --init .
+    REQUIRE_SUCCESS git submodule update --init .
     git checkout tags/v3.21.6
     cd $GRPC_SRC_DIR/third_party/abseil-cpp
-    git submodule update --init .
+    REQUIRE_SUCCESS git submodule update --init .
     return 0
 }
 
+
 openssl_check() {
-    [ -f "$INSTALLDIR/lib/libcrypto.so.1.1" ] || \
-    [ -f "$INSTALLDIR/lib/libcrypto.a" ] || \
+    local os_lib_path="/usr/lib/x86_64-linux-gnu/" # for ubuntu
+    local os_release=`awk -F= '/^NAME/{print $2}' /etc/os-release`
+    if [ "$os_release" != "\"Ubuntu\"" ]; then
+        echo "not Ubuntu"
+        os_lib_path="/usr/lib64/"  # for openanolis, alios
+    fi
+    
+    if [ -f "$os_lib_path/libcrypto.so.1.1" ]; then
+        OPENSSL_LIB_DIR="/usr"
+    else
+        OPENSSL_LIB_DIR=$OCCLUMINSTALLDIR
+    fi
+
+    [ -f "$OCCLUMINSTALLDIR/lib/libcrypto.so.1.1" ] || \
+    [ -f "$OCCLUMINSTALLDIR/lib64/libcrypto.so.1.1" ] || \
+    [ -f "$os_lib_path/libcrypto.so.1.1" ] || \
     return 1
 }
 
 openssl_build() {
     cd "$DEPSDIR/$OPENSSLDIR" && \
-    ./config --prefix=$INSTALLDIR \
+    ./config --prefix=$OCCLUMINSTALLDIR \
       --openssldir=/usr/local/occlum/ssl \
       --with-rand-seed=rdcpu \
       no-zlib no-async no-tests enable-egd && \
-    make -j$(nproc) && make install
+    make -j && make install
 }
 
 libcurl_check() {
-    [ -f "$INSTALLDIR/lib/libcurl.so" ] || \
-    [ -f "$INSTALLDIR/lib/libcurl.a" ] || \
+    [ -f "$OCCLUMINSTALLDIR/lib/libcurl_static.a" ] || \
     return 1
 }
 
@@ -114,13 +135,13 @@ libcurl_build() {
       ./buildconf || exit 1
     fi
     ./configure \
-      --prefix=$INSTALLDIR \
-      --with-openssl \
+      --prefix=$OCCLUMINSTALLDIR \
+      --with-ssl=$OPENSSL_LIB_DIR \
       --without-zlib && \
-    make -j$(nproc) && make install
+    make -j && make install
 
     # Rename static curl lib to force doing staticly link in next step
-    cp $INSTALLDIR/lib/libcurl.a $INSTALLDIR/lib/libcurl_static.a
+    cp $OCCLUMINSTALLDIR/lib/libcurl.a $OCCLUMINSTALLDIR/lib/libcurl_static.a
 }
 
 protobuf_check() {
@@ -139,14 +160,16 @@ protobuf_build() {
         -DBUILD_SHARED_LIBS=TRUE         \
         -DCMAKE_CXX_FLAGS="-fPIC -pie"   \
         -DCMAKE_C_FLAGS="-fPIC -pie"     \
-        -DCMAKE_BUILD_TYPE=Release &&    \
-    make -j$(nproc) && \
+	    -DCMAKE_BUILD_TYPE=Release &&    \
+    make -j && \
     make install
-    [ -f "$INSTALLDIR/lib/libprotobuf.so.32" ] || cp ./libprotobuf.so.32 $INSTALLDIR/lib/
+    #cp $INSTALLDIR/bin/protoc /usr/bin
 }
 
 cares_check() {
-    [ -f "$INSTALLDIR/lib/libcares.so" ] || return 1
+    [ -f "$INSTALLDIR/lib/libcares.so" ] || \
+    [ -f "$INSTALLDIR/lib/libcares.a" ] || \
+    return 1
 }
 
 cares_build() {
@@ -159,7 +182,7 @@ cares_build() {
         -DCMAKE_CXX_FLAGS="-fPIC -pie"   \
         -DCMAKE_C_FLAGS="-fPIC -pie"     \
 	    -DCMAKE_BUILD_TYPE=Release &&    \
-    make -j$(nproc) && \
+    make -j && \
     make install
 }
 
@@ -173,18 +196,17 @@ grpc_build() {
     echo "======== Building grpc ... ========" && \
     cd $DEPSDIR/$GRPCDIR/cmake && \
     rm -rf build && mkdir -p build && cd build && \
-    export PROTOBUF_DIR=$INSTALLDIR
     cmake ../.. \
         -DCMAKE_INSTALL_PREFIX=$INSTALLDIR \
-        -DgRPC_BUILD_TESTS=OFF           \
         -DgRPC_INSTALL=ON                \
         -DgRPC_CARES_PROVIDER=package    \
+        -DgRPC_PROTOBUF_PROVIDER=package \
         -DgRPC_SSL_PROVIDER=package      \
         -DgRPC_ZLIB_PROVIDER=package     \
         -DCMAKE_CXX_FLAGS="-fPIC -pie"   \
         -DCMAKE_C_FLAGS="-fPIC -pie"     \
         -DCMAKE_BUILD_TYPE=Release &&    \
-    make -j$(nproc) && \
+    make VERBOSE=1 -j && \
     make install
     [ -f $INSTALLDIR/lib/libgrpc.a ] || cp ./lib*.a $INSTALLDIR/lib
     [ -f /usr/bin/grpc_cpp_plugin ] || cp ./grpc_cpp_plugin /usr/bin
@@ -211,7 +233,8 @@ fi
 
 # Check the occlum libc type and decide the compiler
 PKGCONFIGPATH="/opt/occlum/toolchains/gcc/x86_64-linux-gnu/lib/pkgconfig"
-INSTALLDIR="/opt/occlum/toolchains/gcc/x86_64-linux-gnu"
+OCCLUMINSTALLDIR="/usr/local/occlum/x86_64-linux-gnu"
+INSTALLDIR="/usr"
 OCCLUMCC="gcc -fPIC -pie"
 OCCLUMCXX="g++ -fPIC -pie"
 if [ "$1" == "--libc" ] ; then
@@ -219,12 +242,14 @@ if [ "$1" == "--libc" ] ; then
         echo "Build with musl libc ..."
         INC_DIR_MUSL="/opt/occlum/toolchains/gcc/x86_64-linux-musl/include"
         PKGCONFIGPATH="/opt/occlum/toolchains/gcc/x86_64-linux-musl/lib/pkgconfig"
-        INSTALLDIR="/opt/occlum/toolchains/gcc/x86_64-linux-musl"
-        OCCLUMCC="/opt/occlum/toolchains/gcc/bin/occlum-gcc -I$INC_DIR_MUSL"
-        OCCLUMCXX="/opt/occlum/toolchains/gcc/bin/occlum-g++ -I$INC_DIR_MUSL"
+        OCCLUMINSTALLDIR="/usr/local/occlum/x86_64-linux-musl"
+        INSTALLDIR="/usr/local/occlum/x86_64-linux-musl"
+        OCCLUMCC="/usr/local/occlum/bin/occlum-gcc -I$INC_DIR_MUSL"
+        OCCLUMCXX="/usr/local/occlum/bin/occlum-g++ -I$INC_DIR_MUSL"
     fi
     shift 2
 fi
+
 export CC=$OCCLUMCC
 export CXX=$OCCLUMCXX
 export PATH=$INSTALLDIR/bin:$PATH
@@ -237,7 +262,7 @@ BUILD_COMPONENTS="${1:-$ALL_COMPONENTS}"
 
 # Download all components once here together
 mkdir -p $DEPSDIR && cd $DEPSDIR || exit 1
-# TRYGET $OPENSSLDIR https://github.com/openssl/openssl/archive/refs/tags/OpenSSL_1_1_1k.tar.gz
+TRYGET $OPENSSLDIR https://github.com/openssl/openssl/archive/refs/tags/OpenSSL_1_1_1k.tar.gz
 TRYGET $CURLDIR https://github.com/curl/curl/archive/curl-7_70_0.tar.gz
 #TRYGET $PROTOBUFDIR https://github.com/protocolbuffers/protobuf/releases/download/v21.6/protobuf-all-21.6.tar.gz
 #TRYGET $CARESDIR https://c-ares.haxx.se/download/c-ares-1.14.0.tar.gz
